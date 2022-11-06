@@ -1,0 +1,136 @@
+# Original idea by @ISnackable. Thanks to him for handling the hardest parts!
+# https://github.com/ISnackable/CercubePlus/blob/main/.github/workflows/Build.yml
+
+name: Build and Release RedditFilter
+
+on:
+  workflow_dispatch:
+    inputs:
+      redditfilter_version:
+        description: "The version of RedditFilter"
+        default: "1.0.8"
+        required: false
+        type: string
+      decrypted_reddit_url:
+        description: "The direct URL to the decrypted Reddit ipa"
+        default: ""
+        required: true
+        type: string
+      reddit_version:
+        description: "The version of Reddit"
+        default: "2022.41.0"
+        required: false
+        type: string
+      create_release:
+        description: "Create a draft release"
+        default: true
+        required: false
+        type: boolean
+  
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build RedditFilter
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Main
+        uses: actions/checkout@v3
+        with:
+          path: main
+          submodules: recursive
+
+      - name: Install Dependencies
+        run: brew install ldid dpkg
+
+      - name: Setup Theos
+        uses: actions/checkout@v3
+        with:
+          repository: theos/theos
+          ref: master
+          path: theos
+          submodules: recursive
+      
+      - name: Caching
+        id: SDK
+        uses: actions/cache@v3.0.11
+        env:
+          cache-name: iOS-15.5-SDK
+        with:
+          path: theos/sdks/
+          key: ${{ env.cache-name }}
+      
+      - name: Download iOS 15.5 SDK
+        if: steps.SDK.outputs.cache-hit != 'true'
+        run: |
+          svn checkout -q https://github.com/chrisharper22/sdks/trunk/iPhoneOS15.5.sdk
+          mv *.sdk $THEOS/sdks
+        env:
+          THEOS: ${{ github.workspace }}/theos
+
+      - name: Setup Theos Jailed
+        uses: actions/checkout@v3
+        with:
+          repository: qnblackcat/theos-jailed
+          ref: master
+          path: theos-jailed
+          submodules: recursive
+
+      - name: Install Theos Jailed
+        run: |
+          ./theos-jailed/install
+        env:
+          THEOS: ${{ github.workspace }}/theos
+
+      - name: Prepare Reddit ipa
+        run: |
+          cd ${{ github.workspace }}/main
+          wget "$REDDIT_URL" --no-verbose -O Reddit.ipa
+          sed -i '' "13s#.*#RedditFilter_IPA = Reddit.ipa#g" Makefile
+        env:
+          REDDIT_URL: ${{ inputs.decrypted_reddit_url }}
+
+      - name: Fix compiling & Build Package
+        id: build_package
+        run: |
+          (echo 'THEOS_IGNORE_PARALLEL_BUILDING_NOTICE = yes' >> ~/.theosrc)
+          cd ${{ github.workspace }}/main
+          (cd ${{ github.workspace }}/main/RedditSideloadFix && sed -i '' "15s#.*#RedditSideloadFix_FRAMEWORKS = Security#g" Makefile)
+          make package FINALPACKAGE=1
+          (mv "packages/$(ls -t packages | head -n1)" "packages/RedditFilter_${{ env.REDDIT_VERSION }}_${{ env.REDDITFILTER_VERSION }}.ipa")
+          echo "package=$(ls -t packages | head -n1)" >>$GITHUB_OUTPUT
+          echo -e  "==> \033[1mSHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')\033[0m"
+
+        env:
+          THEOS: ${{ github.workspace }}/theos
+          REDDITFILTER_VERSION: ${{ inputs.redditfilter_version }}
+          REDDIT_VERSION: ${{ inputs.reddit_version }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        env:
+          REDDITFILTER_VERSION: ${{ inputs.redditfilter_version }}
+          REDDIT_VERSION: ${{ inputs.reddit_version }}
+        with:
+          name: RedditFilter_${{ env.REDDIT_VERSION }}_${{ env.REDDITFILTER_VERSION }}
+          path: ${{ github.workspace }}/main/packages/${{ steps.build_package.outputs.package }}
+          if-no-files-found: error
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v0.1.14
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REDDITFILTER_VERSION: ${{ inputs.redditfilter_version }}
+          REDDIT_VERSION: ${{ inputs.reddit_version }}
+          DRAFT: ${{ inputs.create_release }}
+        with:
+          tag_name: v${{ env.REDDIT_VERSION }}-${{ env.REDDITFILTER_VERSION }}-(${{ github.run_number }})
+          name: v${{ env.REDDIT_VERSION }}-${{ env.REDDITFILTER_VERSION }}-(${{ github.run_number }})
+          files: main/packages/*.ipa
+          draft: ${{ env.DRAFT }}
